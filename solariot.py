@@ -20,42 +20,79 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-from pymodbus.client.sync import ModbusTcpClient
-
 import config
 import json
-import time
 import datetime
-import requests
+import time
+
+from pymodbus.client.sync import ModbusTcpClient
+from pymodbus.payload import BinaryPayloadDecoder
+from pymodbus.constants import Endian
 
 
-def load_registers(type, start, COUNT = 100):
-    try:
-        if type == "read":
-            rr = client.read_input_registers(int(start),
-                                             count = int(COUNT),
-                                             unit = config.slave)
-        elif type == "holding":
-            rr = client.read_holding_registers(int(start),
-                                               count = int(COUNT),
-                                               unit = config.slave)
+def load_registers(registers):
+    # SMA datatypes and their register lengths
+    # S = Signed Number, U = Unsigned Number, STR = String
+    sungrow_datatype = {
+      'S16':1,
+      'U16':1,
+      'S32':2,
+      'U32':2,
+    }
 
-        for num in range(0, int(COUNT)):
-            run = int(start) + num + 1
-            if type == "read" and modmap.read_register.get(str(run)):
-                if '_10' in modmap.read_register.get(str(run)):
-                    inverter[modmap.read_register.get(str(run))[:-3]] = float(rr.registers[num])/10
-                else:
-                    inverter[modmap.read_register.get(str(run))] = rr.registers[num]
-            elif type == "holding" and modmap.holding_register.get(str(run)):
-                inverter[modmap.holding_register.get(str(run))] = rr.registers[num]
+  # request each register from datasets, omit first row which contains only column headers
+    for register in registers:
+        name = register[0]
+        startPos = register[1]
+        data_type = register[2]
+        unit = register[3]
 
-    except Exception as err:
-        print("[ERROR] %s",  err)
+        # if the connection is somehow not possible (e.g. target not responding)
+        # show a error message instead of excepting and stopping
+        try:
+            received = client.read_input_registers(address=startPos,
+                                                   count=sungrow_datatype[data_type],
+                                                   unit=config.slave)
+        except:
+            this_date = str(datetime.datetime.now()).partition('.')[0]
+            error_message = this_date + ': Connection not possible. Check settings or connection.'
+            print(error_message)
+            return  ## prevent further execution of this function
+
+        message = BinaryPayloadDecoder.fromRegisters(received.registers, endian=Endian.Big)
+        ## provide the correct result depending on the defined data type
+        if data_type == 'S32':
+            interpreted = message.decode_32bit_int()
+        elif data_type == 'U32':
+            interpreted = message.decode_32bit_uint()
+        elif data_type == 'S16':
+            interpreted = message.decode_16bit_int()
+        elif data_type == 'U16':
+            interpreted = message.decode_16bit_uint()
+        else: ## if no data data_type is defined do raw interpretation of the delivered data
+            interpreted = message.decode_16bit_uint()
+
+        ## check for "None" data before doing anything else
+        if ((interpreted == MIN_SIGNED) or (interpreted == MAX_UNSIGNED)):
+            displaydata = None
+        else:
+          ## put the data with correct unitting into the data table
+            if unit == 'FIX1':
+                displaydata = float(interpreted) / 10
+            elif unit == 'FIX2':
+                displaydata = float(interpreted) / 100
+            elif unit == 'FIX3':
+                displaydata = float(interpreted) / 1000
+            else:
+                displaydata = interpreted
+
+        #print '************** %s = %s' % (name, str(displaydata))
+        inverter[name] = displaydata
+
+    # Add timestamp
+    inverter["00000 - Timestamp"] = str(datetime.datetime.now()).partition('.')[0]
 
 if __name__ == "__main__":
-    requests.packages.urllib3.disable_warnings()
-
     print("Load config %s", config.model)
 
     # Load the modbus register map for the inverter
@@ -63,18 +100,19 @@ if __name__ == "__main__":
     modmap = __import__(modmap_file)
     print("Load ModbusTcpClient")
 
+    # Connect to the client
     client = ModbusTcpClient(config.inverter_ip,
-                             timeout = config.timeout,
-                             RetryOnEmpty = True,
-                             retries = 3,
-                             port = config.inverter_port)
-    print("Connect")
+                             timeout=config.timeout,
+                             RetryOnEmpty=True,
+                             retries=3,
+                             port=config.inverter_port)
+    print("Connected")
     client.connect()
 
-    inverter = {}
-    bus = json.loads(modmap.scan)
+    MIN_SIGNED   = -2147483648
+    MAX_UNSIGNED =  4294967295
 
-    print(bus)
+    print("Load config %s", config.model)
 
     while True:
         try:
@@ -82,24 +120,8 @@ if __name__ == "__main__":
 
             # Reads the registers
             if 'sungrow-' in config.model:
-                for i in bus['read']:
-                    load_registers("read", i['start'], i['range'])
-                for i in bus['holding']:
-                    load_registers("holding", i['start'], i['range'])
-
-              # Sungrow inverter specifics:
-              # Work out if the grid power is being imported or exported
-            if config.model == "sungrow-sh5k" and \
-                    inverter['grid_import_or_export'] == 65535:
-                        export_power = (65535 - inverter['export_power']) * -1
-                        inverter['export_power'] = export_power
-                        inverter['timestamp'] = "%s/%s/%s %s:%02d:%02d" % (
-                            inverter['day'],
-                            inverter['month'],
-                            inverter['year'],
-                            inverter['hour'],
-                            inverter['minute'],
-                            inverter['second'])
+                load_registers(modmap.sungrow_read_registers)
+                load_registers(modmap.sungrow_holding_registers)
 
             print(inverter)
 
