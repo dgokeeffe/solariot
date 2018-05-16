@@ -30,17 +30,9 @@ from pymodbus.payload import BinaryPayloadDecoder
 from pymodbus.constants import Endian
 
 
-def load_registers(registers):
-    # SMA datatypes and their register lengths
-    # S = Signed Number, U = Unsigned Number, STR = String
-    sungrow_datatype = {
-      'S16':1,
-      'U16':1,
-      'S32':2,
-      'U32':2,
-    }
+def load_registers(registers, read_or_holding, inverter_dict):
 
-  # request each register from datasets, omit first row which contains only column headers
+    # request each register from datasets, omit first row which contains only column headers
     for register in registers:
         name = register[0]
         startPos = register[1]
@@ -50,17 +42,28 @@ def load_registers(registers):
         # if the connection is somehow not possible (e.g. target not responding)
         # show a error message instead of excepting and stopping
         try:
-            received = client.read_input_registers(address=startPos,
-                                                   count=sungrow_datatype[data_type],
-                                                   unit=config.slave)
+            if read_or_holding == "read":
+                received = client.read_input_registers(address=startPos - 1,
+                                                       count=sungrow_datatype[data_type],
+                                                       unit=config.slave)
+            elif read_or_holding == "holding":
+                received = client.read_holding_registers(address=startPos - 1,
+                                                         count=sungrow_datatype[data_type],
+                                                         unit=config.slave)
         except:
             this_date = str(datetime.datetime.now()).partition('.')[0]
             error_message = this_date + ': Connection not possible. Check settings or connection.'
             print(error_message)
             return  ## prevent further execution of this function
 
-        message = BinaryPayloadDecoder.fromRegisters(received.registers, endian=Endian.Big)
-        ## provide the correct result depending on the defined data type
+        # provide the correct result depending on the defined data type
+        # double word data is encoded in little endian, single byte data is in big endian
+        if '32' in data_type:
+            message = BinaryPayloadDecoder.fromRegisters(received.registers, byteorder='>', wordorder='>')
+        else:
+            message = BinaryPayloadDecoder.fromRegisters(received.registers, byteorder='>', wordorder='<')
+
+        # decode based off data type
         if data_type == 'S32':
             interpreted = message.decode_32bit_int()
         elif data_type == 'U32':
@@ -69,10 +72,12 @@ def load_registers(registers):
             interpreted = message.decode_16bit_int()
         elif data_type == 'U16':
             interpreted = message.decode_16bit_uint()
+        elif 'STR' in data_type:
+            interpreted = message.decode_string(10)
         else: ## if no data data_type is defined do raw interpretation of the delivered data
             interpreted = message.decode_16bit_uint()
 
-        ## check for "None" data before doing anything else
+        ## che<k for "None" data before doing anything else
         if ((interpreted == MIN_SIGNED) or (interpreted == MAX_UNSIGNED)):
             displaydata = None
         else:
@@ -87,10 +92,11 @@ def load_registers(registers):
                 displaydata = interpreted
 
         #print '************** %s = %s' % (name, str(displaydata))
-        inverter[name] = displaydata
+        inverter_dict[name] = displaydata
 
     # Add timestamp
-    inverter["00000 - Timestamp"] = str(datetime.datetime.now()).partition('.')[0]
+    inverter_dict["Timestamp"] = str(datetime.datetime.now()).partition('.')[0]
+    return(interver_dict)
 
 if __name__ == "__main__":
     print("Load config %s", config.model)
@@ -114,14 +120,25 @@ if __name__ == "__main__":
 
     print("Load config %s", config.model)
 
+    # SMA datatypes and their register lengths
+    # S = Signed Number, U = Unsigned Number
+    sungrow_datatype = {
+      'S16':1,
+      'U16':1,
+      'S32':2,
+      'U32':2,
+      'STR16*10':10,
+      'U16*18':18,
+    }
+
     while True:
         try:
             inverter = {}
 
             # Reads the registers
             if 'sungrow-' in config.model:
-                load_registers(modmap.sungrow_read_registers)
-                load_registers(modmap.sungrow_holding_registers)
+                inverter = load_registers(modmap.sungrow_read_registers, "read", inverter)
+                inverter = load_registers(modmap.sungrow_holding_registers, "holding", inverter)
 
             print(inverter)
 
